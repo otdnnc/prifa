@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>prifa — private, fast video call</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f7fb;
+      --surface: #ffffff;
+      --surface-2: #f1f3f9;
+      --border: #e3e6ee;
+      --text: #0f172a;
+      --muted: #64748b;
+      --accent: #7c3aed;
+      --accent-text: #ffffff;
+      --on: #10b981;
+      --on-soft: #d1fae5;
+      --danger: #ef4444;
+      --danger-soft: #fee2e2;
+      --code-bg: #0b0f1d;
+      --code-fg: #a5f3a5;
+      --radius: 12px;
+      --radius-sm: 8px;
+      --shadow: 0 1px 2px rgba(15,23,42,.05), 0 4px 16px rgba(15,23,42,.06);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0b1020;
+        --surface: #131a33;
+        --surface-2: #1c2350;
+        --border: #2a3160;
+        --text: #e6edf3;
+        --muted: #94a3b8;
+        --accent: #a78bfa;
+        --accent-text: #0b1020;
+        --on: #34d399;
+        --on-soft: #064e3b;
+        --danger: #f87171;
+        --danger-soft: #4a1212;
+        --shadow: 0 2px 10px rgba(0,0,0,.4);
+      }
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.4;
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+    code, pre, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+    .muted { color: var(--muted); }
+
+    /* ---------- top app bar ---------- */
+    .app-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      position: sticky; top: 0; z-index: 10;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .logo {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 32px; height: 32px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, var(--accent), #ec4899);
+      color: #fff;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    .brand strong { font-size: 1.05rem; letter-spacing: .2px; }
+    .brand .tag {
+      color: var(--muted);
+      font-size: .78rem;
+      padding-left: 10px;
+      margin-left: 4px;
+      border-left: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    .pill {
+      display: inline-block;
+      padding: 3px 10px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      font-size: .75rem;
+      color: var(--muted);
+      background: var(--surface-2);
+      white-space: nowrap;
+    }
+
+    /* ---------- layout ---------- */
+    main {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 24px 20px 60px;
+    }
+
+    /* ---------- join card ---------- */
+    .join-card {
+      max-width: 560px;
+      margin: 40px auto 0;
+      padding: 28px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: var(--shadow);
+    }
+    .join-card h1 {
+      font-size: 1.55rem;
+      margin: 0 0 6px;
+      letter-spacing: -.01em;
+    }
+    .join-card .lead {
+      margin: 0 0 22px;
+      font-size: .92rem;
+    }
+    .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+    .field label {
+      font-size: .82rem;
+      font-weight: 600;
+      display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+    }
+    .field .hint { color: var(--muted); font-weight: 400; font-size: .72rem; }
+    .field input, .field textarea {
+      font: inherit;
+      width: 100%;
+      padding: 10px 12px;
+      background: var(--surface-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      transition: border-color .15s, box-shadow .15s;
+    }
+    .field input:focus, .field textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+    }
+    .field textarea {
+      min-height: 84px;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: .78rem;
+      line-height: 1.5;
+      resize: vertical;
+      word-break: break-all;
+    }
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 18px;
+    }
+    .btn {
+      font: inherit;
+      font-weight: 600;
+      padding: 10px 18px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      background: var(--surface-2);
+      color: var(--text);
+      cursor: pointer;
+      transition: transform .05s, background .15s, border-color .15s, filter .15s;
+    }
+    .btn:hover:not(:disabled) { background: var(--border); }
+    .btn:active:not(:disabled) { transform: translateY(1px); }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-primary {
+      background: var(--accent);
+      color: var(--accent-text);
+      border-color: transparent;
+    }
+    .btn-primary:hover:not(:disabled) { filter: brightness(1.05); background: var(--accent); }
+    .btn-ghost { background: transparent; }
+    .btn-ghost:hover:not(:disabled) { background: var(--surface-2); }
+
+    /* ---------- help disclosure ---------- */
+    details.help {
+      margin-top: 20px;
+      padding: 10px 14px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+    }
+    details.help summary {
+      cursor: pointer;
+      font-weight: 600;
+      list-style: none;
+      display: flex; align-items: center; gap: 8px;
+    }
+    details.help summary::-webkit-details-marker { display: none; }
+    details.help summary::before {
+      content: "?";
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 18px; height: 18px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: var(--accent-text);
+      font-size: 11px;
+      font-weight: 700;
+    }
+    details.help[open] summary { margin-bottom: 10px; }
+    details.help ol { margin: 0; padding-left: 18px; }
+    details.help li { margin: 4px 0; color: var(--muted); font-size: .9rem; }
+    details.help li b { color: var(--text); }
+    details.help code {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: .8em;
+    }
+
+    /* ---------- call view ---------- */
+    .call-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 16px;
+      margin-bottom: 22px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .call-header h2 {
+      font-size: 1.05rem;
+      margin: 0;
+      font-weight: 600;
+      letter-spacing: .01em;
+    }
+    .call-header code {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-size: .82rem;
+    }
+    .call-header .who {
+      margin: 4px 0 0;
+      font-size: .82rem;
+      color: var(--muted);
+    }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; }
+    .ctl {
+      font: inherit;
+      font-weight: 500;
+      padding: 9px 16px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s, transform .05s;
+    }
+    .ctl:hover:not(:disabled) { background: var(--surface-2); }
+    .ctl:active:not(:disabled) { transform: translateY(1px); }
+    .ctl:disabled { opacity: .5; cursor: not-allowed; }
+    .ctl[data-on="true"] {
+      background: var(--on-soft);
+      border-color: var(--on);
+      color: var(--on);
+    }
+    .ctl-danger {
+      background: var(--danger-soft);
+      border-color: var(--danger);
+      color: var(--danger);
+    }
+    .ctl-danger:hover:not(:disabled) {
+      filter: brightness(1.04);
+      background: var(--danger-soft);
+    }
+
+    /* ---------- tiles ---------- */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 14px;
+      margin: 0 0 24px;
+    }
+    .grid:empty::before {
+      content: "Waiting for someone to join… open this page in another window with the same room id.";
+      display: block;
+      grid-column: 1 / -1;
+      padding: 40px 20px;
+      text-align: center;
+      color: var(--muted);
+      background: var(--surface);
+      border: 1px dashed var(--border);
+      border-radius: var(--radius);
+      font-size: .9rem;
+    }
+    .tile {
+      position: relative;
+      overflow: hidden;
+      border-radius: var(--radius);
+      background: #000;
+      border: 1px solid var(--border);
+      aspect-ratio: 4 / 3;
+      box-shadow: var(--shadow);
+    }
+    .tile video {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      background: #000;
+    }
+    .tile audio { display: none; }
+    .tile b {
+      position: absolute;
+      left: 10px;
+      bottom: 10px;
+      display: inline-flex;
+      align-items: baseline;
+      gap: 8px;
+      max-width: calc(100% - 20px);
+      padding: 5px 10px;
+      border-radius: 999px;
+      background: rgba(0, 0, 0, .55);
+      color: #fff;
+      font-weight: 600;
+      font-size: .82rem;
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .tile b small {
+      color: rgba(255, 255, 255, .65);
+      font-size: .65rem;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-weight: 400;
+    }
+    #local-tile {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+    #local-tile b::after {
+      content: "you";
+      margin-left: 4px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      background: var(--accent);
+      color: var(--accent-text);
+      font-size: .65rem;
+      font-weight: 700;
+    }
+
+    /* ---------- log panel ---------- */
+    .log-panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 16px;
+    }
+    .log-panel summary {
+      cursor: pointer;
+      font-weight: 600;
+      color: var(--muted);
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: .9rem;
+    }
+    .log-panel summary::-webkit-details-marker { display: none; }
+    .log-panel summary::before {
+      content: "";
+      width: 8px; height: 8px;
+      background: var(--on);
+      border-radius: 50%;
+      box-shadow: 0 0 0 4px color-mix(in srgb, var(--on) 25%, transparent);
+    }
+    .log-panel[open] summary { margin-bottom: 10px; }
+    pre.log {
+      height: 220px;
+      overflow: auto;
+      background: var(--code-bg);
+      color: var(--code-fg);
+      padding: 12px;
+      font-size: 12px;
+      line-height: 1.55;
+      border-radius: var(--radius-sm);
+      margin: 0;
+    }
+    pre.log::-webkit-scrollbar { width: 10px; height: 10px; }
+    pre.log::-webkit-scrollbar-thumb { background: #1f2937; border-radius: 999px; }
+
+    /* ---------- mobile ---------- */
+    @media (max-width: 640px) {
+      main { padding: 16px 12px 40px; }
+      .join-card { padding: 20px; margin-top: 16px; }
+      .brand .tag { display: none; }
+      .call-header { gap: 14px; }
+      .controls { width: 100%; }
+      .ctl { flex: 1; min-width: 100px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="app-bar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">▶</span>
+      <strong>prifa</strong>
+      <span class="tag">private · fast · http/3</span>
+    </div>
+    <span class="pill" id="protocol">protocol: ?</span>
+  </header>
+
+  <main>
+    <section id="join" class="join-card">
+      <h1>Join a video call</h1>
+      <p class="lead muted">
+        Self-hosted, JWT-authenticated, HTTP/3. Open this page in two browsers
+        and join the same room.
+      </p>
+
+      <div class="field">
+        <label for="name">Your name</label>
+        <input id="name" value="guest" autocomplete="off" spellcheck="false">
+      </div>
+
+      <div class="field">
+        <label for="roomId">
+          Room ID
+          <span class="hint">leave blank to create a new one</span>
+        </label>
+        <input id="roomId" placeholder="e.g. ab12cd34ef56" autocomplete="off" spellcheck="false">
+      </div>
+
+      <div class="field">
+        <label for="token">JWT bearer token</label>
+        <textarea id="token" placeholder="paste a token, or click 'Get dev token' if the server runs with -dev-tokens" spellcheck="false"></textarea>
+      </div>
+
+      <div class="actions">
+        <button id="devToken" class="btn btn-ghost" type="button">Get dev token</button>
+        <button id="go" class="btn btn-primary" type="button">Join / Create</button>
+      </div>
+
+      <details class="help">
+        <summary>How do I get a token?</summary>
+        <ol>
+          <li><b>Dev mode:</b> click <i>Get dev token</i> if the server runs with <code>-dev-tokens</code>.</li>
+          <li><b>CLI:</b> <code>go run ./cmd/token -sub me -secret "$PRIFA_JWT_SECRET"</code></li>
+          <li><b>Your backend:</b> HS256-sign with the same secret (see README).</li>
+        </ol>
+      </details>
+    </section>
+
+    <section id="call" class="call" hidden>
+      <div class="call-header">
+        <div>
+          <h2>Room <code id="rid"></code></h2>
+          <p class="who">You are <code id="me"></code></p>
+        </div>
+        <div class="controls" role="toolbar" aria-label="call controls">
+          <button id="toggleMic" class="ctl" type="button" data-on="false" aria-label="toggle microphone">🎤 Start mic</button>
+          <button id="toggleCam" class="ctl" type="button" data-on="false" aria-label="toggle camera">📷 Start camera</button>
+          <button id="leave" class="ctl ctl-danger" type="button" aria-label="leave call">Leave</button>
+        </div>
+      </div>
+
+      <div class="grid" id="tiles"></div>
+
+      <details class="log-panel">
+        <summary>Events log</summary>
+        <pre class="log" id="log"></pre>
+      </details>
+    </section>
+  </main>
+
+  <script type="module" src="/client.js"></script>
+</body>
+</html>

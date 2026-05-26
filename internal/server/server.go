@@ -7,7 +7,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync"
@@ -19,8 +19,8 @@ import (
 
 // Config controls the listener setup.
 type Config struct {
-	// Addr is the host:port to listen on. The same port is used for TCP/443
-	// (HTTPS) and UDP/443 (HTTP/3).
+	// Addr is the host:port to listen on. The same port is used for TCP
+	// (HTTPS) and UDP (HTTP/3).
 	Addr string
 
 	// CertFile/KeyFile point at a PEM-encoded certificate and private key.
@@ -33,13 +33,17 @@ type Config struct {
 	// EnableHTTPS toggles the TCP HTTPS listener. HTTP/3-only deployments
 	// can disable it, though most browsers need it to discover Alt-Svc.
 	EnableHTTPS bool
+
+	// Logger receives lifecycle and listener errors. Defaults to slog.Default.
+	Logger *slog.Logger
 }
 
 // Server runs both listeners and coordinates shutdown.
 type Server struct {
-	cfg   Config
-	h3    *http3.Server
-	https *http.Server
+	cfg    Config
+	logger *slog.Logger
+	h3     *http3.Server
+	https  *http.Server
 }
 
 // New builds a Server from the given config. It does not start listeners.
@@ -52,6 +56,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.CertFile == "" || cfg.KeyFile == "" {
 		return nil, errors.New("server: CertFile and KeyFile are required")
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
 	}
 
 	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
@@ -75,14 +82,15 @@ func New(cfg Config) (*Server, error) {
 		},
 	}
 
-	s := &Server{cfg: cfg, h3: h3srv}
+	s := &Server{cfg: cfg, logger: cfg.Logger, h3: h3srv}
 
 	if cfg.EnableHTTPS {
 		// Wrap the handler so every HTTPS response carries Alt-Svc, telling
 		// the browser that the same origin is reachable over HTTP/3.
+		logger := cfg.Logger
 		wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if err := h3srv.SetQUICHeaders(w.Header()); err != nil {
-				log.Printf("server: set Alt-Svc: %v", err)
+				logger.Warn("set Alt-Svc header", "error", err)
 			}
 			cfg.Handler.ServeHTTP(w, r)
 		})
@@ -91,6 +99,7 @@ func New(cfg Config) (*Server, error) {
 			Handler:           wrapped,
 			TLSConfig:         tlsConf,
 			ReadHeaderTimeout: 10 * time.Second,
+			ErrorLog:          slog.NewLogLogger(cfg.Logger.Handler(), slog.LevelWarn),
 		}
 	}
 
@@ -106,7 +115,7 @@ func (s *Server) Run(ctx context.Context) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		log.Printf("server: HTTP/3 (QUIC) listening on udp %s", s.cfg.Addr)
+		s.logger.Info("listener started", "transport", "http3", "network", "udp", "addr", s.cfg.Addr)
 		if err := s.h3.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 			errs <- fmt.Errorf("h3: %w", err)
 			return
@@ -118,7 +127,7 @@ func (s *Server) Run(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			log.Printf("server: HTTPS (TCP) listening on tcp %s", s.cfg.Addr)
+			s.logger.Info("listener started", "transport", "https", "network", "tcp", "addr", s.cfg.Addr)
 			if err := s.https.ListenAndServeTLS(s.cfg.CertFile, s.cfg.KeyFile); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				errs <- fmt.Errorf("https: %w", err)
 				return
@@ -129,13 +138,13 @@ func (s *Server) Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
+		s.logger.Info("shutdown requested", "cause", ctx.Err())
 		return s.shutdown()
 	case err := <-errs:
 		if err != nil {
 			_ = s.shutdown()
 			return err
 		}
-		// One listener exited cleanly; bring the other one down too.
 		return s.shutdown()
 	}
 }
@@ -151,6 +160,11 @@ func (s *Server) shutdown() error {
 	}
 	if err := s.h3.Close(); err != nil && firstErr == nil {
 		firstErr = err
+	}
+	if firstErr != nil {
+		s.logger.Warn("shutdown error", "error", firstErr)
+	} else {
+		s.logger.Info("shutdown complete")
 	}
 	return firstErr
 }

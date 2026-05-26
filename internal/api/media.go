@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 
+	"prifa/internal/auth"
+	"prifa/internal/logx"
 	"prifa/internal/room"
 )
 
@@ -24,15 +26,25 @@ func (h *Handler) publishTrack(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	claims, _ := auth.FromContext(r.Context())
+	if !claims.AllowsRoom(rm.ID) {
+		writeError(w, r, http.StatusForbidden, "token not valid for this room")
+		return
+	}
+	if !claims.HasScope(auth.ScopePublish) {
+		writeError(w, r, http.StatusForbidden, "token missing track.publish scope")
+		return
+	}
+
 	pid := r.PathValue("pid")
 	p, ok := rm.Participant(pid)
 	if !ok {
-		writeError(w, http.StatusNotFound, "participant not in room")
+		writeError(w, r, http.StatusNotFound, "participant not in room")
 		return
 	}
 	kind := room.TrackKind(r.PathValue("kind"))
 	if !kind.Valid() {
-		writeError(w, http.StatusBadRequest, "unknown track kind")
+		writeError(w, r, http.StatusBadRequest, "unknown track kind")
 		return
 	}
 
@@ -43,13 +55,21 @@ func (h *Handler) publishTrack(w http.ResponseWriter, r *http.Request) {
 
 	track, err := p.StartTrack(kind, contentType)
 	if err != nil {
-		writeError(w, http.StatusConflict, err.Error())
+		writeError(w, r, http.StatusConflict, err.Error())
 		return
 	}
 	rm.AnnounceTrackStarted(pid, kind, contentType)
+
+	logger := logx.FromContext(r.Context()).With(
+		"room", rm.ID, "participant", pid, "kind", string(kind), "ct", contentType,
+	)
+	logger.Info("track publish started")
+
+	var totalBytes int64
 	defer func() {
 		p.EndTrack(kind)
 		rm.AnnounceTrackEnded(pid, kind)
+		logger.Info("track publish ended", "bytes", totalBytes)
 	}()
 
 	// Acknowledge the upload so the client can confirm the track exists.
@@ -64,7 +84,9 @@ func (h *Handler) publishTrack(w http.ResponseWriter, r *http.Request) {
 	for {
 		n, err := r.Body.Read(buf)
 		if n > 0 {
+			totalBytes += int64(n)
 			if perr := track.Publish(buf[:n]); perr != nil {
+				logger.Debug("publish stopped: track closed", "error", perr)
 				return
 			}
 		}
@@ -72,7 +94,11 @@ func (h *Handler) publishTrack(w http.ResponseWriter, r *http.Request) {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				return
 			}
-			// Client disconnect or stream reset: stop quietly.
+			if logx.IsClientGone(err) {
+				logger.Debug("publisher disconnected", "error", err)
+				return
+			}
+			logger.Warn("publisher read error", "error", err)
 			return
 		}
 	}
@@ -86,20 +112,30 @@ func (h *Handler) subscribeTrack(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	claims, _ := auth.FromContext(r.Context())
+	if !claims.AllowsRoom(rm.ID) {
+		writeError(w, r, http.StatusForbidden, "token not valid for this room")
+		return
+	}
+	if !claims.HasScope(auth.ScopeSubscribe) {
+		writeError(w, r, http.StatusForbidden, "token missing track.subscribe scope")
+		return
+	}
+
 	pid := r.PathValue("pid")
 	p, ok := rm.Participant(pid)
 	if !ok {
-		writeError(w, http.StatusNotFound, "participant not in room")
+		writeError(w, r, http.StatusNotFound, "participant not in room")
 		return
 	}
 	kind := room.TrackKind(r.PathValue("kind"))
 	if !kind.Valid() {
-		writeError(w, http.StatusBadRequest, "unknown track kind")
+		writeError(w, r, http.StatusBadRequest, "unknown track kind")
 		return
 	}
 	track, ok := p.Track(kind)
 	if !ok {
-		writeError(w, http.StatusNotFound, "track not active")
+		writeError(w, r, http.StatusNotFound, "track not active")
 		return
 	}
 
@@ -109,10 +145,18 @@ func (h *Handler) subscribeTrack(w http.ResponseWriter, r *http.Request) {
 	}
 	chunks, err := track.Subscribe(subscriberID)
 	if err != nil {
-		writeError(w, http.StatusConflict, err.Error())
+		writeError(w, r, http.StatusConflict, err.Error())
 		return
 	}
 	defer track.Unsubscribe(subscriberID)
+
+	logger := logx.FromContext(r.Context()).With(
+		"room", rm.ID, "publisher", pid, "subscriber", subscriberID, "kind", string(kind),
+	)
+	logger.Info("track subscribe started")
+
+	var totalBytes int64
+	defer func() { logger.Info("track subscribe ended", "bytes", totalBytes) }()
 
 	w.Header().Set("Content-Type", track.ContentType())
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
@@ -129,7 +173,14 @@ func (h *Handler) subscribeTrack(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if _, err := w.Write(chunk); err != nil {
+			n, err := w.Write(chunk)
+			totalBytes += int64(n)
+			if err != nil {
+				if logx.IsClientGone(err) {
+					logger.Debug("subscriber disconnected", "error", err)
+				} else {
+					logger.Warn("subscriber write error", "error", err)
+				}
 				return
 			}
 			if flusher != nil {

@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+
+	"prifa/internal/auth"
+	"prifa/internal/logx"
 )
 
 // streamEvents pushes room events to the client as Server-Sent Events.
@@ -14,22 +17,31 @@ func (h *Handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	claims, _ := auth.FromContext(r.Context())
+	if !claims.AllowsRoom(rm.ID) {
+		writeError(w, r, http.StatusForbidden, "token not valid for this room")
+		return
+	}
 	pid := r.URL.Query().Get("participant")
 	if pid == "" {
-		writeError(w, http.StatusBadRequest, "participant query param required")
+		writeError(w, r, http.StatusBadRequest, "participant query param required")
 		return
 	}
 	if _, ok := rm.Participant(pid); !ok {
-		writeError(w, http.StatusNotFound, "participant not in room")
+		writeError(w, r, http.StatusNotFound, "participant not in room")
 		return
 	}
 
 	events, err := rm.SubscribeEvents(pid)
 	if err != nil {
-		writeError(w, http.StatusConflict, err.Error())
+		writeError(w, r, http.StatusConflict, err.Error())
 		return
 	}
 	defer rm.UnsubscribeEvents(pid)
+
+	logger := logx.FromContext(r.Context()).With("room", rm.ID, "participant", pid)
+	logger.Info("events stream opened")
+	defer logger.Info("events stream closed")
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache, no-transform")

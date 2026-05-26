@@ -8,8 +8,14 @@ import (
 
 // Participant is a member of a room. Each participant owns up to one audio
 // and one video track at a time.
+//
+// ID is the per-session identity assigned by the server (used as a path
+// segment in all subsequent calls). UserID is an optional external identity
+// pulled from the JWT subject claim, so the application that minted the
+// token can correlate a session back to its own user record.
 type Participant struct {
 	ID       string    `json:"id"`
+	UserID   string    `json:"userId,omitempty"`
 	Name     string    `json:"name"`
 	JoinedAt time.Time `json:"joinedAt"`
 
@@ -17,9 +23,10 @@ type Participant struct {
 	tracks map[TrackKind]*Track
 }
 
-func newParticipant(name string) *Participant {
+func newParticipant(name, userID string) *Participant {
 	return &Participant{
 		ID:       newID(8),
+		UserID:   userID,
 		Name:     name,
 		JoinedAt: time.Now().UTC(),
 		tracks:   make(map[TrackKind]*Track),

@@ -31,9 +31,11 @@ func newRoom(name string) *Room {
 	}
 }
 
-// Join adds a new participant and broadcasts the join event.
-func (r *Room) Join(name string) *Participant {
-	p := newParticipant(name)
+// Join adds a new participant and broadcasts the join event. The userID
+// argument is the external identity (JWT subject) that drove the join; it
+// may be empty when the server is running in -auth-optional mode.
+func (r *Room) Join(name, userID string) *Participant {
+	p := newParticipant(name, userID)
 	r.mu.Lock()
 	r.participants[p.ID] = p
 	r.mu.Unlock()
