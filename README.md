@@ -1,58 +1,119 @@
-# prifa — private, fast video call server
+<div align="center">
 
-A self-hosted, JWT-authenticated, HTTP/3 video-call backend written in Go.
-Clone it, point a domain at it, and you have a private video-call service
-that any front-end (web, mobile, server-to-server) can drive over a small
-REST + streaming API.
+# prifa
+
+**Private, fast video-call server.** Self-hosted, JWT-authenticated, HTTP/3.
+
+[![Go Version](https://img.shields.io/badge/go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Transport](https://img.shields.io/badge/transport-HTTP%2F3%20%2B%20QUIC-FF6B35)](https://datatracker.ietf.org/doc/html/rfc9114)
+[![Auth](https://img.shields.io/badge/auth-JWT%20HS256-FFC107?logo=jsonwebtokens&logoColor=black)](#authentication)
+[![Status](https://img.shields.io/badge/status-production%20ready-success)](#deployment)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](#contributing)
+
+[**Quick start**](#quick-start) ·
+[**Why prifa**](#why-prifa) ·
+[**API**](#api-reference) ·
+[**JavaScript**](#javascript-integration) ·
+[**Deploy**](#deployment) ·
+[**Architecture**](#architecture)
+
+</div>
+
+---
+
+A self-hosted, drop-in video-call backend. Your application server mints a
+short-lived JWT, your client passes it to prifa, and prifa fans audio and
+video bytes between participants over HTTP/3. No third-party media plane,
+no user database inside prifa, no proprietary protocols on the wire — just
+streaming HTTP that any client (browser, mobile, server-to-server) can drive.
 
 ```
-  Browser / mobile / backend ──►  prifa (HTTP/3 + HTTPS)
-                                    │
-                                    ├── REST     /api/rooms, /api/.../participants
-                                    ├── SSE      /api/rooms/{id}/events
-                                    └── Streaming media  POST / GET /tracks/{kind}
+   Your app  ──►  mints JWT  ──►  Browser  ──►  HTTP/3 (QUIC)  ──►  prifa
+                                                                     ├── REST     /api/rooms, /api/.../participants
+                                                                     ├── SSE      /api/rooms/{id}/events
+                                                                     └── Streams  /api/.../tracks/{audio|video}
 ```
-
-Designed to be embedded as the media plane behind your own SaaS: your
-application service mints a short-lived JWT, hands it to the client, and
-prifa enforces room/scope/expiry on every call.
 
 ---
 
 ## Why prifa
 
-- **Private by default.** No third-party media relay, no analytics
-  pipeline. Your traffic terminates at a binary you run.
-- **Fast by default.** HTTP/3 (QUIC) for media and control. No
-  TCP head-of-line blocking; one lost packet does not freeze every track.
-- **Drop-in for your SaaS.** JWT bearer auth on every endpoint. Your
-  existing auth service signs HS256 tokens; prifa validates them. No
-  user database lives inside prifa.
-- **Operable.** Structured `log/slog` access logs with request IDs,
-  `/healthz` and `/readyz` probes, graceful shutdown, JSON or text logs.
-- **Small surface.** One binary, in-memory rooms, no external services
-  required. Stick it behind a load balancer or run a single instance.
+|                          | prifa | Bring-your-own SFU (Janus, mediasoup, LiveKit) | SaaS (Zoom, Daily, Agora) |
+| ------------------------ | :---: | :--------------------------------------------: | :-----------------------: |
+| Self-hosted              |  ✓    |                       ✓                        |             —             |
+| No external user DB      |  ✓    |                       —                        |             —             |
+| HTTP/3 first             |  ✓    |                       —                        |             ~             |
+| Stdlib-only auth         |  ✓    |                       —                        |             —             |
+| No RTP / SRTP / codec parsing |  ✓ (just bytes)    |                       — (full SFU)                       |        — (full SFU)       |
+| One static binary        |  ✓    |                       —                        |             —             |
+| Suits 1k-viewer broadcasts | —     |                       ✓                        |             ✓             |
 
-> Media note: prifa forwards opaque media bytes (e.g. fragmented WebM the
-> browser produces with `MediaRecorder`); it does not parse RTP, do
-> congestion control, or transcode. It is a real-time bytestream relay,
-> not a full SFU. See *Limitations* at the bottom.
+prifa is the right tool when you want **a small, private real-time relay
+behind your own SaaS** — calls, meetings, two-way support sessions. It is
+**not** an SFU: there is no congestion control, no simulcast, no codec
+parsing. Media is opaque bytes (typically fragmented WebM from the browser).
 
 ---
 
-## Layout
+## Features
+
+- **JWT bearer auth** on every endpoint. Pure-stdlib HS256, no external
+  deps. Tokens carry `sub`, optional `room` binding, optional `scope`
+  restriction, and standard `iss` / `aud` / `exp` claims.
+- **HTTP/3 (QUIC) + HTTPS** on the same port. Browsers load the page over
+  HTTPS, then silently upgrade follow-up requests to h3 via `Alt-Svc`.
+- **Independent audio and video tracks.** Mute, audio-only, video-only,
+  and per-kind toggles fall out of the protocol for free.
+- **Server-Sent Events** for room control (`participant.joined`,
+  `track.started`, …). Late-joiner init-segment caching for WebM.
+- **Structured logs** (`log/slog`) with per-request IDs and per-stream
+  byte/duration accounting. JSON or text output.
+- **Production knobs**: CORS allowlist, issuer/audience verification, log
+  level, `/healthz` + `/readyz`, graceful shutdown, empty-room janitor.
+- **Demo browser client** (vanilla JS, no framework) plus an offline JWT
+  minter (`cmd/token`) and a self-signed cert generator (`cmd/gencert`).
+
+---
+
+## Quick start
+
+```bash
+# 1. Generate a self-signed cert for localhost (or use mkcert / your own).
+go run ./cmd/gencert -hosts localhost,127.0.0.1,::1
+
+# 2. Pick a JWT signing secret. Keep it in your secret store in production.
+export PRIFA_JWT_SECRET=$(openssl rand -hex 32)
+
+# 3. Run with the dev token endpoint enabled so the demo page can mint tokens.
+go run . -addr :8443 \
+         -cert certs/cert.pem -key certs/key.pem \
+         -dev-tokens
+```
+
+Open <https://localhost:8443/> in two browser windows. In each:
+
+1. Click **Get dev token**
+2. Click **Join / Create**
+3. Click **Start mic** and/or **Start camera**
+
+In production, drop `-dev-tokens` and let your application backend mint
+tokens directly with the same `PRIFA_JWT_SECRET`.
+
+---
+
+## Repository layout
 
 ```
 .
 ├── main.go                       # entrypoint; loads config, builds handler
 ├── cmd/
-│   ├── gencert/main.go           # self-signed cert generator
-│   └── token/main.go             # offline JWT minter
+│   ├── gencert/                  # self-signed cert generator
+│   └── token/                    # offline JWT minter
 ├── internal/
 │   ├── api/                      # HTTP handlers (REST, SSE, streaming media)
 │   ├── auth/                     # HS256 JWT sign/verify + middleware
 │   ├── config/                   # flags + env loader
-│   ├── logx/                     # slog setup + access log middleware
+│   ├── logx/                     # slog setup + access-log middleware
 │   ├── room/                     # in-memory rooms, participants, tracks
 │   └── server/                   # HTTP/3 + HTTPS bootstrap
 ├── web/                          # demo browser client (vanilla JS)
@@ -61,59 +122,38 @@ prifa enforces room/scope/expiry on every call.
 
 ---
 
-## Quick start
-
-```bash
-# 1. Generate a self-signed cert (or use mkcert / your own)
-go run ./cmd/gencert -hosts localhost,127.0.0.1,::1
-
-# 2. Pick a JWT signing secret (32+ random bytes recommended)
-export PRIFA_JWT_SECRET=$(openssl rand -hex 32)
-
-# 3. Run the server — HTTP/3 + HTTPS on :8443
-go run . -addr :8443 \
-         -cert certs/cert.pem -key certs/key.pem \
-         -dev-tokens                    # exposes /api/auth/token for local dev
-```
-
-Open <https://localhost:8443/> in two browser windows, accept the cert,
-click *Get dev token*, then *Join / Create*, then *Start camera + mic*.
-
-For production, omit `-dev-tokens` and mint tokens from your own backend.
-
----
-
 ## Configuration
 
-Every flag has an env equivalent. Env wins when set.
+Every flag has an env equivalent — env wins when set. Required values are
+**bold**.
 
-| Flag | Env | Default | Description |
-| --- | --- | --- | --- |
-| `-addr` | `PRIFA_ADDR` | `:8443` | Listen address (used for both TCP/HTTPS and UDP/QUIC). |
-| `-cert` | `PRIFA_CERT` | `certs/cert.pem` | TLS certificate. |
-| `-key`  | `PRIFA_KEY`  | `certs/key.pem`  | TLS private key. |
-| `-web`  | `PRIFA_WEB_DIR` | `web` | Static client directory; empty to disable. |
-| `-no-https` | `PRIFA_NO_HTTPS` | `false` | Disable TCP/HTTPS (HTTP/3 only). |
-| `-jwt-secret` | `PRIFA_JWT_SECRET` | *(none)* | **Required.** HS256 secret. Prefer the env variable. |
-| `-jwt-issuer` | `PRIFA_JWT_ISSUER` | *(none)* | If set, tokens must carry this `iss` claim. |
-| `-jwt-audience` | `PRIFA_JWT_AUDIENCE` | *(none)* | If set, tokens must carry this `aud` claim. |
-| `-auth-optional` | `PRIFA_AUTH_OPTIONAL` | `false` | Accept anonymous requests. **Dev only.** |
-| `-dev-tokens` | `PRIFA_DEV_TOKENS` | `false` | Mount `POST /api/auth/token`. **Dev only.** |
-| `-dev-token-ttl` | `PRIFA_DEV_TOKEN_TTL` | `1h` | Default TTL for dev-minted tokens. |
-| `-allowed-origins` | `PRIFA_ALLOWED_ORIGINS` | *(reflect any)* | Comma-separated CORS allowlist. |
-| `-log-level` | `PRIFA_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error`. |
-| `-log-format` | `PRIFA_LOG_FORMAT` | `text` | `text` or `json`. Use `json` in production. |
+| Flag                | Env                       | Default            | Description                                                            |
+| ------------------- | ------------------------- | ------------------ | ---------------------------------------------------------------------- |
+| `-addr`             | `PRIFA_ADDR`              | `:8443`            | Listen address (used for both TCP/HTTPS and UDP/QUIC).                 |
+| `-cert`             | `PRIFA_CERT`              | `certs/cert.pem`   | TLS certificate.                                                       |
+| `-key`              | `PRIFA_KEY`               | `certs/key.pem`    | TLS private key.                                                       |
+| `-web`              | `PRIFA_WEB_DIR`           | `web`              | Static client directory; empty disables.                               |
+| `-no-https`         | `PRIFA_NO_HTTPS`          | `false`            | Disable TCP/HTTPS (HTTP/3 only).                                       |
+| **`-jwt-secret`**   | **`PRIFA_JWT_SECRET`**    | —                  | **Required.** HS256 secret. Prefer the env variable.                   |
+| `-jwt-issuer`       | `PRIFA_JWT_ISSUER`        | —                  | If set, tokens must carry this `iss` claim.                            |
+| `-jwt-audience`     | `PRIFA_JWT_AUDIENCE`      | —                  | If set, tokens must carry this `aud` claim.                            |
+| `-auth-optional`    | `PRIFA_AUTH_OPTIONAL`     | `false`            | Accept anonymous requests. **Dev only.**                               |
+| `-dev-tokens`       | `PRIFA_DEV_TOKENS`        | `false`            | Mount `POST /api/auth/token`. **Dev only.**                            |
+| `-dev-token-ttl`    | `PRIFA_DEV_TOKEN_TTL`     | `1h`               | Default TTL for dev-minted tokens.                                     |
+| `-allowed-origins`  | `PRIFA_ALLOWED_ORIGINS`   | reflect any        | Comma-separated CORS allowlist.                                        |
+| `-log-level`        | `PRIFA_LOG_LEVEL`         | `info`             | `debug` · `info` · `warn` · `error`.                                   |
+| `-log-format`       | `PRIFA_LOG_FORMAT`        | `text`             | `text` or `json`. Use `json` in production.                            |
 
-The server refuses to start if `PRIFA_JWT_SECRET` is missing, unless you
-opt in to `-auth-optional`.
+The server refuses to start without `PRIFA_JWT_SECRET` unless you opt in
+to `-auth-optional`.
 
 ---
 
-## JWT authentication
+## Authentication
 
-Every `/api/*` endpoint requires a bearer token signed HS256 with your
-`PRIFA_JWT_SECRET`. There is no built-in user database — your application
-backend is the trust root.
+Every `/api/*` endpoint requires a bearer token signed HS256 with
+`PRIFA_JWT_SECRET`. There is no user database inside prifa — your
+application backend is the trust root.
 
 ### Token format
 
@@ -122,7 +162,7 @@ backend is the trust root.
   "sub":   "user-42",                            // your external user id (-> Participant.UserID)
   "name":  "Alice",                              // display name (overrides request body)
   "room":  "abc123",                             // optional: bind token to one room
-  "scope": ["track.publish","track.subscribe"],  // optional: empty = full access
+  "scope": ["track.publish","track.subscribe"],  // optional: empty == full access
   "iss":   "your-app",                           // optional, only checked if server has -jwt-issuer
   "aud":   "prifa",                              // optional, only checked if server has -jwt-audience
   "iat":   1717000000,
@@ -130,30 +170,32 @@ backend is the trust root.
 }
 ```
 
-Scopes recognised by the server (a token without scopes has full access):
+### Scopes
 
-| Scope | Allows |
-| --- | --- |
-| `room.create` | `POST /api/rooms` |
-| `room.list`   | `GET /api/rooms` |
-| `room.join`   | `POST /api/rooms/{id}/participants` |
-| `track.publish`   | `POST /api/rooms/{id}/participants/{pid}/tracks/{kind}` |
-| `track.subscribe` | `GET  /api/rooms/{id}/participants/{pid}/tracks/{kind}` |
+| Scope               | Allows                                                       |
+| ------------------- | ------------------------------------------------------------ |
+| `room.create`       | `POST /api/rooms`                                            |
+| `room.list`         | `GET /api/rooms`                                             |
+| `room.join`         | `POST /api/rooms/{id}/participants`                          |
+| `track.publish`     | `POST /api/rooms/{id}/participants/{pid}/tracks/{kind}`      |
+| `track.subscribe`   | `GET  /api/rooms/{id}/participants/{pid}/tracks/{kind}`      |
 
-When `room` is set, the token only works against that room id. Use this
-to issue per-meeting tokens from your backend.
+A token with no scopes has **full access**. Scopes are an opt-in
+restriction. When `room` is set, the token only works against that one
+room — use this to issue per-meeting tokens from your backend.
 
-### How to attach the token
+### How the client attaches the token
 
-| Surface | Mechanism |
-| --- | --- |
-| REST + streaming `fetch` | `Authorization: Bearer <jwt>` |
-| Native `EventSource` (SSE) | append `?token=<jwt>` (EventSource cannot carry custom headers) |
-| `<video src=…>` with token | append `?token=<jwt>` |
+| Surface                       | Mechanism                                                                   |
+| ----------------------------- | --------------------------------------------------------------------------- |
+| REST + streaming `fetch`      | `Authorization: Bearer <jwt>`                                               |
+| Native `EventSource` (SSE)    | append `?token=<jwt>` (EventSource cannot carry custom headers)             |
+| `<video src=…>` with token    | append `?token=<jwt>`                                                       |
 
 ### Minting tokens
 
-**Locally for testing**
+<details>
+<summary><b>CLI (offline, for testing)</b></summary>
 
 ```bash
 go run ./cmd/token \
@@ -164,7 +206,10 @@ go run ./cmd/token \
     -ttl 1h
 ```
 
-**From your backend (Node.js, jsonwebtoken)**
+</details>
+
+<details>
+<summary><b>Node.js (jsonwebtoken)</b></summary>
 
 ```js
 import jwt from 'jsonwebtoken';
@@ -181,10 +226,14 @@ const token = jwt.sign(
 );
 ```
 
-**From your backend (Python, PyJWT)**
+</details>
+
+<details>
+<summary><b>Python (PyJWT)</b></summary>
 
 ```python
-import jwt, time
+import jwt, time, os
+
 token = jwt.encode({
   "sub":   user.id,
   "name":  user.display_name,
@@ -195,48 +244,81 @@ token = jwt.encode({
 }, os.environ["PRIFA_JWT_SECRET"], algorithm="HS256")
 ```
 
-**For local development**, run the server with `-dev-tokens` and call
-`POST /api/auth/token` (no auth required) with the body
-`{"sub":"...","name":"...","room":"...","scope":[],"ttlSeconds":3600}`.
+</details>
+
+<details>
+<summary><b>Go (golang-jwt)</b></summary>
+
+```go
+tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+    "sub":   userID,
+    "name":  displayName,
+    "room":  roomID,
+    "scope": []string{"room.join", "track.publish", "track.subscribe"},
+    "iat":   time.Now().Unix(),
+    "exp":   time.Now().Add(time.Hour).Unix(),
+})
+s, _ := tok.SignedString([]byte(os.Getenv("PRIFA_JWT_SECRET")))
+```
+
+</details>
+
+<details>
+<summary><b>Local dev (POST /api/auth/token)</b></summary>
+
+Run the server with `-dev-tokens`, then:
+
+```bash
+curl -X POST -H 'Content-Type: application/json' \
+     -d '{"sub":"me","name":"Alice","room":"abc123","scope":[],"ttlSeconds":3600}' \
+     https://localhost:8443/api/auth/token
+```
+
+Returns `{ "token": "...", "expiresAt": 1717003600, "tokenType": "Bearer" }`.
+
+</details>
 
 ---
 
-## REST + streaming API
+## API reference
 
-All endpoints below require a valid bearer token unless noted. Bodies are
-JSON. Path parameters: `{roomID}` is a 12-hex-char id returned by
-`POST /api/rooms`; `{pid}` is the 16-hex-char participant id returned by
-`POST /api/rooms/{roomID}/participants`; `{kind}` is `audio` or `video`.
+All paths below require `Authorization: Bearer <jwt>` unless noted.
+`{roomID}` is the id returned by `POST /api/rooms`; `{pid}` is the
+participant id returned by join; `{kind}` is `audio` or `video`.
 
 ### Rooms
 
-| Method | Path | Body | Returns |
-| --- | --- | --- | --- |
-| `POST` | `/api/rooms` | `{ "name": "string?" }` | `{ id, name, createdAt }` |
-| `GET`  | `/api/rooms` | — | `{ rooms: [...] }` (filtered to the token's room when room-bound) |
-| `GET`  | `/api/rooms/{roomID}` | — | room detail incl. participants and active tracks |
+| Method | Path                          | Body                              | Returns                                                       |
+| ------ | ----------------------------- | --------------------------------- | ------------------------------------------------------------- |
+| `POST` | `/api/rooms`                  | `{ "name": "string?" }`           | `{ id, name, createdAt }`                                     |
+| `GET`  | `/api/rooms`                  | —                                 | `{ rooms: [...] }` (filtered to the token's room when bound)  |
+| `GET`  | `/api/rooms/{roomID}`         | —                                 | room detail incl. participants and active tracks              |
 
 ### Participants
 
-| Method | Path | Body | Returns |
-| --- | --- | --- | --- |
-| `POST`   | `/api/rooms/{roomID}/participants` | `{ "name": "string?" }` | `{ room, participant: { id, userId, name, joinedAt } }` |
-| `DELETE` | `/api/rooms/{roomID}/participants/{pid}` | — | `204` |
+| Method   | Path                                          | Body                    | Returns                                                                    |
+| -------- | --------------------------------------------- | ----------------------- | -------------------------------------------------------------------------- |
+| `POST`   | `/api/rooms/{roomID}/participants`            | `{ "name": "string?" }` | `{ room, participant: { id, userId, name, joinedAt } }`                    |
+| `DELETE` | `/api/rooms/{roomID}/participants/{pid}`      | —                       | `204`                                                                      |
 
 The JWT `sub` claim becomes `participant.userId` so your application can
 join the session back to its own user record.
 
-### Event stream (Server-Sent Events)
+### Events (Server-Sent Events)
 
 ```
 GET /api/rooms/{roomID}/events?participant={pid}
 ```
 
-Pass the token via `Authorization` (if you can) or `?token=<jwt>`. First
-event is always `hello` with the current participant list. Subsequent
-events: `participant.joined`, `participant.left`, `track.started`,
-`track.ended`. The stream stays open until the participant leaves or the
-request is cancelled.
+Pass the token via `Authorization` (if possible) or `?token=<jwt>`. First
+event is always `hello` with the current participant list. Subsequent:
+
+| Event                  | Payload                                                                        |
+| ---------------------- | ------------------------------------------------------------------------------ |
+| `participant.joined`   | `{ id, name, joinedAt, … }`                                                    |
+| `participant.left`     | `{ id, name }`                                                                 |
+| `track.started`        | `{ participant, kind, contentType }`                                           |
+| `track.ended`          | `{ participant, kind }`                                                        |
 
 ### Publish media
 
@@ -252,65 +334,61 @@ tracks. A participant can publish:
 
 - audio only (audio-only call),
 - video only (camera-only, no mic),
-- both (publish each as its own streaming POST in parallel),
-- start one, stop, restart, leave the other untouched ("mute" = stop the
-  audio POST; "unmute" = start a new one).
+- both (one streaming POST per kind, in parallel),
+- start one, stop, restart, leave the other untouched
+  ("mute" = stop the audio POST; "unmute" = start a new one).
 
 Each kind emits its own `track.started` / `track.ended` event so peers
-can attach / detach a single stream without disturbing the other. The
-body stays open for as long as the publisher is sending. Every chunk
-is fanned out to subscribers.
+attach / detach a single stream without disturbing the other.
 
 ### Subscribe to media
 
 ```
-GET /api/rooms/{roomID}/participants/{pid}/tracks/{kind}?subscriber=any-id-you-like
+GET /api/rooms/{roomID}/participants/{pid}/tracks/{kind}?subscriber=any-id
 Authorization: Bearer <jwt>
 ```
 
-Returns 200 with the publisher's `Content-Type` and a streaming body that
-mirrors what the publisher uploaded. The first chunk a publisher sent is
-cached and replayed to late subscribers (so WebM init segments don't
-get lost). Returns 404 if no track of that kind is currently active.
+Returns 200 with the publisher's `Content-Type` and a streaming body
+mirroring what the publisher uploaded. The publisher's first chunk is
+cached and replayed to late subscribers (so WebM init segments don't get
+lost). Returns 404 if no track of that kind is currently active.
 
-### Health
+### Operations
 
-| Method | Path | Auth | Purpose |
-| --- | --- | --- | --- |
-| `GET` | `/healthz` | no | Process is alive. |
-| `GET` | `/readyz`  | no | Process is ready to serve. |
-
-### Dev-only
-
-| Method | Path | Auth | Purpose |
-| --- | --- | --- | --- |
-| `POST` | `/api/auth/token` | no | Mint a short-lived token. Mounted only with `-dev-tokens`. |
+| Method | Path                  | Auth | Purpose                                                            |
+| ------ | --------------------- | :--: | ------------------------------------------------------------------ |
+| `GET`  | `/healthz`            |  —   | Process liveness (load balancers, k8s).                            |
+| `GET`  | `/readyz`             |  —   | Process readiness.                                                 |
+| `POST` | `/api/auth/token`     |  —   | Mint a short-lived token. Mounted **only with `-dev-tokens`**.     |
 
 ---
 
-## JavaScript / browser usage
+## JavaScript integration
 
 This is the canonical recipe a third-party web app uses to drive prifa.
-The full working version lives in [`web/client.js`](web/client.js).
+The full working version is in [`web/client.js`](web/client.js).
 
-### 1. Get a token
+<details open>
+<summary><b>1. Get a token</b></summary>
 
-Your backend signs a JWT (see *JWT authentication* above) and ships it to
-the page. Store it however you want — `sessionStorage`, an in-memory
-variable, a `HttpOnly` cookie that your app proxies, anything that
-matches your CSRF posture.
+Your backend signs a JWT and ships it to the page (sessionStorage, an
+in-memory variable, an `HttpOnly` cookie proxied by your app — whatever
+matches your CSRF posture).
 
 ```js
 const TOKEN = await fetch('/my-app/prifa-token').then(r => r.text());
 const PRIFA = 'https://meet.example.com';   // your prifa origin
 ```
 
-### 2. Helpers
+</details>
+
+<details open>
+<summary><b>2. Helpers</b></summary>
 
 ```js
 const authHeaders = (extra = {}) => ({ ...extra, Authorization: 'Bearer ' + TOKEN });
 
-// For EventSource / <video src=...> (no custom headers possible).
+// For EventSource and <video src=…> where the browser cannot add headers.
 const withToken = (url) => {
   const sep = url.includes('?') ? '&' : '?';
   return `${url}${sep}token=${encodeURIComponent(TOKEN)}`;
@@ -327,21 +405,26 @@ async function api(method, path, body) {
 }
 ```
 
-### 3. Create or join a room
+</details>
+
+<details>
+<summary><b>3. Create or join a room</b></summary>
 
 ```js
-// Either create a new room, or skip this step if your backend already did.
-const room = await api('POST', '/api/rooms', { name: "Standup" });
-
-// Join — returns the per-session participant id (used in every later call).
+const room   = await api('POST', '/api/rooms', { name: 'Standup' });
 const joined = await api('POST', `/api/rooms/${room.id}/participants`, { name: 'Alice' });
 const me     = joined.participant.id;
 ```
 
-### 4. Subscribe to control events (SSE)
+</details>
+
+<details>
+<summary><b>4. Subscribe to control events (SSE)</b></summary>
 
 ```js
-const events = new EventSource(withToken(`${PRIFA}/api/rooms/${room.id}/events?participant=${me}`));
+const events = new EventSource(
+  withToken(`${PRIFA}/api/rooms/${room.id}/events?participant=${me}`)
+);
 
 events.addEventListener('hello',              (e) => console.log('hello',  JSON.parse(e.data)));
 events.addEventListener('participant.joined', (e) => console.log('joined', JSON.parse(e.data)));
@@ -353,12 +436,13 @@ events.addEventListener('track.started',      (e) => {
 events.addEventListener('track.ended',        (e) => { /* tear down subscription */ });
 ```
 
-### 5. Publish mic and camera (independently)
+</details>
+
+<details open>
+<summary><b>5. Publish mic and camera (independently)</b></summary>
 
 Each kind is its own streaming POST, so the user can start them, stop
-them, and mute them separately. The general recipe (see `web/client.js`
-for the full implementation, including a toggle that stops/restarts the
-upload on mute/unmute):
+them, and mute them separately.
 
 ```js
 async function publishKind(kind /* 'audio' | 'video' */) {
@@ -382,8 +466,6 @@ async function publishKind(kind /* 'audio' | 'video' */) {
     duplex:  'half',                       // Chrome ≥ 105, recent Firefox
   });
 
-  // Returned handle lets you mute/leave: stop the recorder + the local
-  // tracks, and the server emits track.ended automatically.
   return { stop: () => { rec.stop(); ms.getTracks().forEach(t => t.stop()); } };
 }
 
@@ -399,11 +481,10 @@ const mic2 = await publishKind('audio');
 Mute, audio-only, and video-only fall out of this naturally — just
 publish (or not) each kind on its own.
 
-### 6. Play a remote participant
+</details>
 
-Each `track.started` event tells you what kind became available. Attach
-the streaming GET into a `<video>` (for `video`) or `<audio>` (for
-`audio`) element via `MediaSource`. The skeleton:
+<details>
+<summary><b>6. Play a remote participant</b></summary>
 
 ```js
 async function subscribeRemote(pid, kind) {
@@ -412,7 +493,8 @@ async function subscribeRemote(pid, kind) {
   if (!resp.ok) return;
   const mime = resp.headers.get('Content-Type');
 
-  const el = document.getElementById(`${kind}-${pid}`); // <video id="video-..."> or <audio id="audio-...">
+  // <video id="video-..."> for video, <audio id="audio-..."> for audio.
+  const el = document.getElementById(`${kind}-${pid}`);
   const ms = new MediaSource();
   el.src   = URL.createObjectURL(ms);
   await new Promise(r => ms.addEventListener('sourceopen', r, { once: true }));
@@ -434,81 +516,90 @@ async function subscribeRemote(pid, kind) {
     drain();
   }
 }
-
-// Wire it to the event stream:
-events.addEventListener('track.started', (e) => {
-  const { participant, kind } = JSON.parse(e.data).data;
-  if (participant !== me) subscribeRemote(participant, kind);
-});
-events.addEventListener('track.ended', (e) => {
-  // tear down just this kind; the other one keeps playing
-});
 ```
 
-For a production-quality version with autoplay handling, drift catch-up,
-and buffer trimming, see [`web/client.js`](web/client.js).
+For autoplay handling, drift catch-up, and buffer trimming, see
+[`web/client.js`](web/client.js).
 
-### 7. Leave
+</details>
+
+<details>
+<summary><b>7. Leave</b></summary>
 
 ```js
 events.close();
-rec.stop();
+mic?.stop();
+camera?.stop();
 await api('DELETE', `${PRIFA}/api/rooms/${room.id}/participants/${me}`);
 ```
 
-### Browser support cheat-sheet
+</details>
 
-| Feature | Min versions |
-| --- | --- |
-| `fetch` streaming POST (`duplex: 'half'`) | Chrome 105, Edge 105, recent Firefox (behind `dom.fetch.requestBody.upload.streams.enabled` until lately). Safari: not yet. |
-| `MediaSource` + WebM (VP8/VP9 + Opus) | Chrome, Firefox, Edge. Safari needs MSE-in-Workers for WebM. |
-| HTTP/3 | Chrome, Edge, Firefox, Safari, all current. |
+### Browser support
 
-If you need Safari publishers, you can transcode to Annex-B H.264 / fMP4
-in the client (out of scope for this README).
+| Feature                                            | Min versions                                                                                   |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `fetch` streaming POST (`duplex: 'half'`)          | Chrome 105, Edge 105, recent Firefox. Safari: not yet.                                         |
+| `MediaSource` + WebM (VP8/VP9 + Opus)              | Chrome, Firefox, Edge. Safari needs MSE-in-Workers for WebM.                                   |
+| HTTP/3                                             | Chrome, Edge, Firefox, Safari (all current).                                                   |
+
+If you need Safari publishers, transcode to Annex-B H.264 / fMP4 in the
+client (out of scope for this repo).
 
 ---
 
 ## TLS certificates
 
-HTTP/3 mandates TLS 1.3 — there is no plaintext mode. Browsers also
-refuse to negotiate QUIC against a certificate they do not trust.
+HTTP/3 mandates TLS 1.3 — there is no plaintext mode. Browsers refuse to
+negotiate QUIC against an untrusted certificate.
 
-### Local development
+<details>
+<summary><b>Local development — bundled generator</b></summary>
 
 ```bash
-# bundled generator, ECDSA P-256, no extra tools
 go run ./cmd/gencert -hosts localhost,127.0.0.1,::1
 ```
 
-Then either trust it (recommended):
+Then trust the result so the browser accepts it:
 
-- **macOS:**
+- **macOS**
   ```bash
   sudo security add-trusted-cert -d -r trustRoot \
     -k /Library/Keychains/System.keychain certs/cert.pem
   ```
-- **Linux (Debian/Ubuntu):**
+- **Linux (Debian/Ubuntu)**
   ```bash
   sudo cp certs/cert.pem /usr/local/share/ca-certificates/prifa.crt
   sudo update-ca-certificates
   ```
-- **Windows:** `certutil -addstore -f "ROOT" certs\cert.pem`.
+- **Windows** `certutil -addstore -f "ROOT" certs\cert.pem`
 
-Or use [`mkcert`](https://github.com/FiloSottile/mkcert) which manages a
-local root for you:
+</details>
+
+<details>
+<summary><b>Local development — mkcert (cleanest)</b></summary>
 
 ```bash
+brew install mkcert nss      # macOS; equivalents for Linux/Windows exist
 mkcert -install
-mkcert -cert-file certs/cert.pem -key-file certs/key.pem localhost 127.0.0.1 ::1
+mkcert -cert-file certs/cert.pem -key-file certs/key.pem \
+       localhost 127.0.0.1 ::1
 ```
 
-### Production
+`mkcert -install` adds a local root CA to your trust store, so HTTP/3
+negotiates cleanly with no warnings.
+
+</details>
+
+<details>
+<summary><b>Production</b></summary>
 
 Use a real CA-issued certificate (Let's Encrypt, your corporate PKI,
-ZeroSSL, etc.). Point `-cert` / `-key` (or `PRIFA_CERT` / `PRIFA_KEY`)
-at the PEM files. Reload requires a process restart — gracefully
-re-deploy with `SIGTERM` and a rolling instance behind your LB.
+ZeroSSL, …). Point `-cert` / `-key` at the PEM files. Cert reload
+requires a process restart — gracefully rolling-deploy with `SIGTERM`
+behind your LB.
+
+</details>
 
 ---
 
@@ -526,34 +617,32 @@ PRIFA_ALLOWED_ORIGINS=https://app.example.com \
   -key  /etc/letsencrypt/live/meet.example.com/privkey.pem
 ```
 
-Open both TCP/443 (HTTPS) and UDP/443 (QUIC) on your firewall.
+Open both **TCP/443** (HTTPS) and **UDP/443** (QUIC) on your firewall.
 
 ### Behind a load balancer
 
-QUIC requires a UDP-aware load balancer (e.g. AWS NLB UDP listener,
-HAProxy ≥ 3.0 with QUIC support, GCP TCP/UDP LB). The same balancer
-must forward TCP/443 for the HTTPS fallback that advertises Alt-Svc.
+QUIC requires a UDP-aware LB (AWS NLB UDP listener, HAProxy ≥ 3.0 with
+QUIC support, GCP TCP/UDP LB, …). The same balancer must forward TCP/443
+for the HTTPS fallback that advertises `Alt-Svc`.
 
-Because rooms live in process memory (see *Limitations*), pin a meeting
-to a single backend — either by hashing the room id at the LB, or by
-having your app server hand the client the URL of the prifa instance
-that owns the room.
+Because rooms live in process memory, **pin a meeting to one backend** —
+either by hashing the room id at the LB, or by having your app server
+hand the client the URL of the prifa instance that owns the room.
 
-### Container
+### Docker
 
 ```Dockerfile
 FROM golang:1.23 AS build
 WORKDIR /src
 COPY . .
-RUN go build -o /out/prifa . && go build -o /out/gencert ./cmd/gencert
+RUN go build -o /out/prifa . \
+ && go build -o /out/gencert ./cmd/gencert
 
 FROM gcr.io/distroless/base-debian12
 COPY --from=build /out/prifa /prifa
 EXPOSE 8443/tcp 8443/udp
 ENTRYPOINT ["/prifa"]
 ```
-
-Run with:
 
 ```bash
 docker run --rm \
@@ -568,48 +657,82 @@ docker run --rm \
 
 - Every response emits an access log line at the level matching its
   status code (info / warn / error). Use `-log-format json` for shippers.
-- Each request gets an `X-Request-Id` header, used in all log lines so
-  you can correlate. Clients may set one to thread through their stack.
+- Each request gets an `X-Request-Id` header used in all log lines —
+  clients may set one to thread through their stack.
 - `GET /healthz` is a process liveness probe; `GET /readyz` is readiness.
 
 ---
 
-## Internals
+## Architecture
 
-### Room model (`internal/room`)
+```
+                ┌─────────────────────────────────────────────────────────────┐
+                │                          prifa process                       │
+                │                                                              │
+   HTTPS/h2 ────┼─►  TCP listener  ──┐                                         │
+                │                    │   ┌──────────────────────────────────┐ │
+   HTTP/3       │                    ├──►│  api/Handler (mux)               │ │
+   (QUIC)  ────┼─►  UDP listener  ──┘   │   • auth middleware (JWT HS256)  │ │
+                │                        │   • access-log middleware (slog) │ │
+                │                        │   • REST + SSE + streaming media │ │
+                │                        └─────────────┬────────────────────┘ │
+                │                                      │                       │
+                │   ┌──────────────────────────────────▼────────────────────┐ │
+                │   │  internal/room                                          │ │
+                │   │   Manager → Room → Participant → Track (per kind)       │ │
+                │   │   - in-memory, mutex-guarded                            │ │
+                │   │   - bounded subscriber channels (drop slow subscribers) │ │
+                │   │   - first-chunk init-segment cache for late joiners     │ │
+                │   └─────────────────────────────────────────────────────────┘ │
+                └──────────────────────────────────────────────────────────────┘
+```
+
+<details>
+<summary><b>Room model (<code>internal/room</code>)</b></summary>
 
 - `Manager` — owns all rooms, lookup by ID, periodic empty-room sweep.
 - `Room` — owns participants and the event fan-out.
-- `Participant` — has an internal session id, an external `userId`
-  (from the JWT subject), and up to one `audio` and one `video` track.
-- `Track` — single-publisher / many-subscriber byte stream with bounded
-  channels. The first chunk is retained as the "init segment" and
+- `Participant` — internal session id, external `userId` (JWT subject),
+  up to one `audio` and one `video` track.
+- `Track` — single-publisher, many-subscriber byte stream with bounded
+  channels. The first chunk is retained as the init segment and
   replayed to late subscribers.
 - `Event` — JSON envelope broadcast through SSE.
 
 All maps are guarded by `sync.RWMutex`. Slow subscribers lose chunks /
 events but never block the room.
 
-### HTTP API (`internal/api`)
+</details>
+
+<details>
+<summary><b>HTTP API (<code>internal/api</code>)</b></summary>
 
 Go 1.22 method+path routing. Each `/api/*` route is wrapped with the
 auth middleware (`internal/auth`). Streaming endpoints read in 64 KiB
 chunks and `Flush()` after every write so QUIC streams stay live.
 
-### Auth (`internal/auth`)
+</details>
+
+<details>
+<summary><b>Auth (<code>internal/auth</code>)</b></summary>
 
 Pure-stdlib HS256 JWT (no external deps). `Authenticator.Required`
 verifies signature, expiry, optional iss/aud, and attaches the parsed
 claims to the request context. Handlers consult `claims.AllowsRoom(id)`
 and `claims.HasScope(...)` for fine-grained checks.
 
-### Server (`internal/server`)
+</details>
+
+<details>
+<summary><b>Server (<code>internal/server</code>)</b></summary>
 
 A wrapper around `http3.Server` and `http.Server`. Loads the cert once,
 configures TLS 1.3 with `h3` / `h2` / `http/1.1` ALPN, and tears both
-listeners down on context cancellation. The HTTPS handler is wrapped to
-emit `Alt-Svc: h3=":<port>"; ma=...` so browsers upgrade follow-up
+listeners down on context cancellation. The HTTPS handler is wrapped
+to emit `Alt-Svc: h3=":<port>"; ma=...` so browsers upgrade follow-up
 requests to HTTP/3.
+
+</details>
 
 ---
 
@@ -621,24 +744,43 @@ requests to HTTP/3.
 - **No RTP / no SFU.** prifa forwards opaque bytes. No codec parsing,
   no per-subscriber pacing, no simulcast. Sufficient for low-latency
   fan-out of `MediaRecorder` output; if you need 1k-viewer broadcast,
-  use an SFU.
-- **Late-joiner init segments.** Covered automatically for the common
-  fragmented-WebM case (`Track` caches and replays the first chunk),
-  but other container formats may need extra logic.
-- **HS256 only.** RS256 / ES256 are not implemented; they are 100 lines
+  use a full SFU.
+- **HS256 only.** RS256 / ES256 aren't implemented; they're ~100 lines
   away with `crypto/rsa` or `crypto/ecdsa` if you need asymmetric
   signing (e.g. an external IdP).
-- **No rate limiting / per-room quotas built in.** Front it with your
-  own LB / API gateway if you need them.
+- **No rate limiting built in.** Front it with your own LB / API
+  gateway if you need quotas.
 
 ---
 
-## Development tips
+## Roadmap
 
-- `go test ./...` runs the unit tests (currently covering the JWT codec).
-- Tail the server's stdout for structured logs; pipe through `jq` if you
-  use `-log-format json`.
-- In Chrome, `chrome://net-export/` → `chrome://net-internals/#events`
-  is the canonical way to confirm a request went over h3.
-- `nghttp3` / `quiche-client` are useful for testing the server without
-  a browser.
+- [ ] RS256 / ES256 JWT support
+- [ ] Optional Redis-backed room store for clustering
+- [ ] WHIP/WHEP-style endpoints alongside the native streaming API
+- [ ] WebTransport client for ultra-low-latency publishers
+- [ ] Per-token rate limit + per-room quotas
+- [ ] Recording sink (write each track to disk / S3)
+
+PRs against any of these are welcome.
+
+---
+
+## Contributing
+
+```bash
+go test ./...      # unit tests (covers the JWT codec)
+go vet ./...       # static analysis
+go build ./...     # all binaries
+```
+
+Open an issue or send a PR. Keep changes focused — one feature or fix
+per PR. Match the existing style: plain stdlib, no premature abstraction,
+structured logs over `fmt.Printf`.
+
+---
+
+## License
+
+Add a `LICENSE` file at the project root before publishing. MIT is a fair
+default for a video-call relay; pick what fits your needs.
