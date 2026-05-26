@@ -1,0 +1,5 @@
+/certs/
+*.pem
+/prifa
+/dist/
+.DS_Store
